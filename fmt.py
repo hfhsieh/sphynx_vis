@@ -41,6 +41,7 @@ fmt_radgrav = np.dtype([("idx",     "<i4"),
                         ("Iyz",     "<f8"),
                         ("Izz",     "<f8")  ])
 
+
 # format in luminosity.d
 fmt_luminosity = np.dtype([("t",        "<f8"),
                            ("Lnu_e",    "<f8"),
@@ -48,6 +49,7 @@ fmt_luminosity = np.dtype([("t",        "<f8"),
                            ("Lnu_x",    "<f8"),
                            ("Nnu_e",    "<f8"),
                            ("Nnu_ebar", "<f8")  ])
+
 
 # format in binary files: initial condition & data/
 fmt_binary = np.dtype([("dummy1",     "<i4"),
@@ -70,9 +72,9 @@ fmt_binary = np.dtype([("dummy1",     "<i4"),
                        ("fx",         "<f8"),  # gravitational force in the x direction (with GREP correction if any)
                        ("fy",         "<f8"),  # gravitational force in the y direction (with GREP correction if any)
                        ("fz",         "<f8"),  # gravitational force in the z direction (with GREP correction if any)
-                       ("gradp_x",    "<f8"),  # pressure gradient in the x direction
-                       ("gradp_y",    "<f8"),  # pressure gradient in the y direction
-                       ("gradp_z",    "<f8"),  # pressure gradient in the z direction
+                       ("gradp_x",    "<f8"),  # pressure gradient in the x direction?
+                       ("gradp_y",    "<f8"),  # pressure gradient in the y direction?
+                       ("gradp_z",    "<f8"),  # pressure gradient in the z direction?
                        ("temp",       "<f8"),
                        ("avisc",      "<f8"),  # artificial viscosity?
                        ("energy",     "<f8"),
@@ -84,7 +86,7 @@ fmt_binary = np.dtype([("dummy1",     "<i4"),
                        ("znu_e",      "<f8"),
                        ("znu_ebar",   "<f8"),
                        ("nvi",        "<f8"),
-                       ("gprad",      "<f8"),  # pressure gradient in the r direction
+                       ("gprad",      "<f8"),  # pressure gradient in the r direction?
                        ("fgrad",      "<f8"),  # gravitational force in the r direction (with GREP correction if any)
                        ("c",          "<f8"),  # sound speed
                        ("Lnur_e",     "<f8"),
@@ -95,3 +97,4 @@ fmt_binary = np.dtype([("dummy1",     "<i4"),
                        ("Lnuxac",     "<f8"),
                        ("yedot",      "<f8"),
                        ("dummy2",     "<i4")  ])
+

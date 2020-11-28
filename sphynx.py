@@ -5,7 +5,7 @@
 #  Purpose:
 #    Class objects that contains functions for visualizing SPHYNX resutls
 #
-#  Last Updated: 2020/11/03
+#  Last Updated: 2020/11/29
 #  He-Feng Hsieh
 
 
@@ -15,10 +15,17 @@ import yt
 import numpy as np
 import matplotlib as mpl
 from glob import glob
+from bisect import bisect
+from subprocess import check_output
 from matplotlib import pyplot as plt
 from matplotlib import gridspec as gridspec
+from matplotlib.colors import DivergingNorm
+from yt.fields.particle_fields import add_volume_weighted_smoothed_field
+from NuclearEos import NuclearEOS
 from .fmt import *
 from .lib_gw import *
+from .lib_kernels import *
+from .lib_BV import BV_frequency
 
 
 # physcial constant
@@ -36,7 +43,7 @@ quant_radgrav = set(fmt_radgrav.names)
 quant_binary  = set(fmt_binary.names)
 
 
-class sphynx_loader():
+class sphynx_ascii():
     """
     Contains functions for loading SPHYNX's ASCII results
     """
@@ -45,39 +52,12 @@ class sphynx_loader():
 
         self.central_values = None
         self.radgrav        = None
-        self.luminosity     = None
+        self.luminosity     = dict()
         self.pb             = None
         self.pb_time        = None
         self.pb_nout        = None
         self.time           = None
         self.time_rel       = None  # time relative to bounce
-
-    def _load_central_values(self):
-        # data in central_values.d
-        fn = os.path.join(self.path, "central_values.d")
-#        return np.genfromtxt(fn, fmt_central_values)
-        self.central_values = np.genfromtxt(fn, fmt_central_values)
-
-    def _load_radgrav(self):
-        # data in central_values.d
-        fn = os.path.join(self.path, "radgrav.d")
-        self.radgrav = np.genfromtxt(fn, fmt_radgrav)
-
-    def _load_luminosity(self):
-        # data in central_values.d
-        fn = os.path.join(self.path, "luminosity.d")
-        self.luminosity = np.genfromtxt(fn, fmt_luminosity)
-
-    def _load_tiempos(self):
-        # data in tiempos.d
-        fn   = os.path.join(self.path, "tiempos.d")
-        data = np.genfromtxt(fn, fmt_tiempos)
-
-        self.time     = dict(zip(data["idx"], data["time"] ))
-        # if the simulation restarts from postbounce, the relative time is not correct!
-        # here we obtain the relative time from the physical time
-        self.time_rel = dict(zip(data["idx"], data["time"] - self.pb_time))
-#        self.time_rel = dict(zip(data["idx"], data["time_rel"]))
 
     def get_bounce(self):
         # load postbounce time in bounce.d
@@ -91,21 +71,51 @@ class sphynx_loader():
             self.pb      = False
 
     def get_central_values(self):
-        self._load_central_values()
+        fn = os.path.join(self.path, "central_values.d")
+        self.central_values = np.genfromtxt(fn, dtype = fmt_central_values)
 
     def get_radgrav(self):
-        self._load_radgrav()
-
-    def get_luminosity(self):
-        self._load_luminosity()
+        fn = os.path.join(self.path, "radgrav.d")
+        self.radgrav = np.genfromtxt(fn, dtype = fmt_radgrav)
 
     def get_tiempos(self):
-        self._load_tiempos()
+        fn   = os.path.join(self.path, "tiempos.d")
+        data = np.genfromtxt(fn, dtype = fmt_tiempos)
+
+        # if the simulation restarts from postbounce, the relative time is not correct!
+        # here we obtain the relative time from the physical time
+        self.time     = dict(zip(data["idx"], data["time"]               ))
+        self.time_rel = dict(zip(data["idx"], data["time"] - self.pb_time))
+
+    def get_luminosity(self):
+        # the number of column in luminosity.d is not fixed...
+        # thus, we store the luminosity data as dictionary
+        fn = os.path.join(self.path, "luminosity.d")
+
+        # count the # of column in each row
+        num_column = check_output("awk '{print NF}' " + fn, shell = True)
+        num_column = [int(row)  for row in num_column.strip().split(b"\n")]
+        num_column_3 = num_column.count(3)  # number of row that has only 3 columns
+
+        # read the first 3 columns and last 3 columns separately
+        time,  Lnu_e, Lnu_ebar = np.genfromtxt(fn, usecols = [0, 1, 2], unpack = True)
+        Lnu_x, Nnu_e, Nnu_ebar = np.genfromtxt(fn, usecols = [3, 4, 5], unpack = True, skip_header = num_column_3)
+        # add missing data
+        Lnu_x    = np.hstack([ [np.NaN] * num_column_3, Lnu_x    ])
+        Nnu_e    = np.hstack([ [np.NaN] * num_column_3, Nnu_e    ])
+        Nnu_ebar = np.hstack([ [np.NaN] * num_column_3, Nnu_ebar ])
+
+        data = time, Lnu_e, Lnu_ebar, Lnu_x, Nnu_e, Nnu_ebar
+
+        # store into dictionary
+        for key, value in zip(fmt_luminosity.names, data):
+            self.luminosity[key] = value
 
 
 class sphynx_binary():
     """
-    Contains functions for loading data in binary files
+    Contains functions for loading data in binary files, create yt objects,
+    and add derived fields in yt object
     """
     def __init__(self, rundir, runpath):
         self.path = os.path.join(runpath, rundir)
@@ -114,29 +124,24 @@ class sphynx_binary():
         self.binary_fn = None
         self.ds        = None
 
-    def _load_binary(self, fn):
-        # binary files: initial condition & data/
-        fn = os.path.join(self.path, fn)
-        self.binary    = np.fromfile(fn, fmt_binary)
-        self.binary_fn = fn
-
     def get_all_binary(self, directory = "data"):
         # return the index of all binary files in directory
-        fn_list = glob(os.path.join(self.path, directory, "*"))
+        fn_list  = glob(os.path.join(self.path, directory, "*"))
         fn_index = [int(fn.split(".")[-1])  for fn in sorted(fn_list)]
         return fn_index
 
     def get_binary(self, fn):
-        self._load_binary(fn)
-        print("File {} is loaded.".format(self.binary_fn))
+        # binary files: initial condition & data/
+        fn = os.path.join(self.path, fn)
 
-    def create_ytobj(self, fn, n_ref = 64):
+        if fn != self.binary_fn:
+            self.binary    = np.fromfile(fn, dtype = fmt_binary)
+            self.binary_fn = fn
+            print("File {} is loaded.".format(self.binary_fn))
+
+    def create_yt_obj(self, fn, n_ref = 64):
         # create a yt object using data in binary files
-        self._load_binary(fn)
-
-        # compute particle mass
-        par_mass = np.diff(self.binary["mass_cum"])[0]
-        par_mass = np.ones(self.binary["idx"].size) * par_mass
+        self.get_binary(fn)
 
         data = {'particle_position_x':      self.binary["x"],
                 'particle_position_y':      self.binary["y"],
@@ -148,7 +153,7 @@ class sphynx_binary():
                 'smoothing_length':         self.binary["h"],
                 'particle_gas_density':     self.binary["promro"],
                 'particle_gas_temperature': self.binary["temp"],
-                'particle_mass':            par_mass               }
+                'particle_mass':            self.calc_parmass()    }
 
         var_known = set(["x", "y", "z", "vx", "vy", "vz", "idx", "h", "promro", "temp"])
 
@@ -162,18 +167,21 @@ class sphynx_binary():
         self.ds = yt.load_particles(data, n_ref = n_ref, bbox = bbox,
                                     length_unit = yt.units.cm, mass_unit = yt.units.g, time_unit = yt.units.s)
 
-        # create the field list?
+        # fake command to create the field list?!
         # Otherwise the ds object would not have the attribute field_info
         self.ds.field_list;
 
         print("File {} is ported into yt object self.ds.".format(self.binary_fn))
 
+    def add_yt_smoothed_field(self, quant, kernel = "cubic"):
+        # add yt derived, smoothed field
+        add_volume_weighted_smoothed_field("all", "particle_position", "particle_mass",
+                                           "smoothing_length", "particle_gas_density",
+                                           quant, self.ds.field_info, kernel_name = kernel)
+
     def calc_parmass(self):
         # compute the particle mass
-        parmass = np.diff(self.binary["mass_cum"])
-        parmass = np.hstack([self.binary["mass_cum"][0], parmass])
-
-        return parmass
+        return np.diff(self.binary["mass_cum"], prepend = 0.)
 
     def calc_quadmom(self):
         # compute the 2nd-order time derivative of mass quadrupole moment
@@ -187,6 +195,7 @@ class sphynx_binary():
         vy = self.binary["vy"]
         vz = self.binary["vz"]
 
+        # adopt from actualizamod.f90
         ax = -(self.binary["gradp_x"] - const_G * self.binary["fx"])
         ay = -(self.binary["gradp_y"] - const_G * self.binary["fy"])
         az = -(self.binary["gradp_z"] - const_G * self.binary["fz"])
@@ -224,7 +233,7 @@ class sphynx_par():
 
     def __init__(self, rundir, runpath):
         self.path = os.path.join(runpath, rundir)
-        self.par = dict()
+        self.par  = dict()
 
         self._load_parameter(os.path.join(self.path, "parameters.f90"))
         self._load_parameter(os.path.join(self.path, "parameters_idsa.f90"))
@@ -281,12 +290,12 @@ class sphynx_par():
         return self.par.get(key.lower(), None)
 
 
-class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
+class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
     """
     Contains functions for visualization
     """
-    def __init__(self, rundir, runpath):
-        sphynx_loader.__init__(self, rundir = rundir, runpath = runpath)
+    def __init__(self, rundir, runpath, load_eos = False):
+        sphynx_ascii.__init__(self, rundir = rundir, runpath = runpath)
         sphynx_binary.__init__(self, rundir = rundir, runpath = runpath)
         sphynx_par.__init__(self, rundir = rundir, runpath = runpath)
         self.path = os.path.join(runpath, rundir)
@@ -294,10 +303,27 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         self.get_bounce()
         self.get_tiempos()
 
-    def __str__(self):
-        print(self.path)
+        # Since NuclearEOS can be instantized once only, it would be better
+        # to create the NuclearEOS object outside the sphynx object
+        self.fn_eos = os.path.join(self.path, self.getpar("eostab"))
+        self.neos   = None
 
-    def __get_evolution(self, quant, tscale = "pb"):
+        if load_eos:
+            self._load_eostable()
+
+    def __str__(self):
+        return self.path
+
+    def _load_eostable(self):
+        self.fn_eos = os.path.join(self.path, self.getpar("eostab"))
+        self.neos   = NuclearEOS(self.fn_eos)
+
+    def _free_eostable(self):
+        if self.neos is not None:
+            self.neos.del_table()
+            self.neos = None
+
+    def _get_evolution(self, quant, tscale = "pb"):
         """
         Get the evolution of given quantity 'quant'. Currently, only support quantities in
 
@@ -334,21 +360,21 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
 
         return time, data
 
-    def getprofile(self, nout):
+    def get_profile(self, nout):
         # get the data in the binary file in directory 'data'
         fn = os.path.join("data", "s1.{:06d}".format(nout))
         self.get_binary(fn)
 
-    def getinitmodel(self):
+    def get_initmodel(self):
         # get the data in the initial model 'archivo'
         fn = self.getpar('archivo')
-        fn = os.path.join("..", "initialmodels", "fn")  # path relative to the run directory
+        fn = os.path.join("..", "initialmodels", fn)  # path relative to the run directory
         self.get_binary(fn)
 
     def get_ytobj(self, nout, n_ref = 64):
         # create the yt object from the binary file in directory 'data'
         fn = os.path.join("data", "s1.{:06d}".format(nout))
-        self.create_ytobj(fn, n_ref)
+        self.create_yt_obj(fn, n_ref)
 
     def _get_xlabel(self, tscale = "pb"):
         # choose the x label
@@ -371,7 +397,7 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         # choose the y label for gw plot
         return r"$10^{21}$" + self._get_gw_text(mode)
 
-    def _calc_gw_strain(self, phi, theta, dist = 10, mode = "both"):
+    def calc_gw_strain(self, phi, theta, dist = 10, mode = "both"):
         """
         Compute the GW strains
 
@@ -465,7 +491,7 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
                 return np.sum(data[cond])
 
             for nout in nouts:
-                self.getprofile(nout)
+                self.get_profile(nout)
                 radius = self.binary["radius"] / 1e5  # to km
                 I_all  = self.calc_quadmom()
 
@@ -490,6 +516,74 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
 
         print("Output file: {}".format(fnout))
 
+    def calc_BV_frequency(self, nout, dr = 1e5, rmax = 2e7, rsh = None,
+                          method = "binary", bin_data = False, neos = None):
+        """
+        Parameters
+        ----------
+        nout: scalar or sequence of output indices
+        dr: the bin width and the center of lowest bin
+        rmax: the center of highest bin
+        rsh: shock radius. Set to rmax if not specified
+        method: if method == "yt"    : using binned yt-redndering meshgrid data
+                             "binary": using binned SPHYNX's binary output
+                             "sph"   : using SPHYNX's binary output, and SPH formalism for gradient
+        bin_data: Boolean. Only works if method == "sph"
+                  If True, the bv from "sph" method is binned
+        """
+        assert method in ["binary", "yt", "sph"], "Unknown method: {}".format(method)
+
+        if neos is None:
+            if self.neos is None:
+                raise ValueError ("No nuclear EoS table specified! "
+                                  "Run self._load_eostable() to load table "
+                                  "or assign a NuclearEOS instance to 'neos'.")
+            else:
+                neos = self.neos
+
+        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+#            BV_freq = dict()
+            BV_freq = [None] * len(nout)
+
+            for idx, n in enumerate(nout):
+                radius, bv = self.calc_BV_frequency(n, dr = dr, rmax = rmax, rsh = rsh, method = method, neos = neos)
+                BV_freq[idx] = bv
+
+            return radius, np.array(BV_freq)
+
+        else: # case: one nout specified
+            BV_obj  = BV_frequency(neos)
+
+            if method == "binary":
+                self.get_profile(nout)
+                radius, bv = BV_obj.get_bv_sphynx_bin(self.binary, dr = dr, rmax = rmax, rsh = rsh)
+            elif method == "sph":
+                radius, bv = BV_obj.get_bv_sphynx_sph(self.binary, dr = dr, rmax = rmax, rsh = rsh,
+                                                      kernel_idx = self.getpar("kernel"), bin_data = bin_data)
+            else:
+                self.get_ytobj(nout)
+
+                # create needed derived fields
+                for quant in ["particle_gas_density", "s", "ye"]:
+                    self.add_yt_smoothed_field(quant)
+
+                def _mass(field, data):
+                    return data[('deposit', 'all_smoothed_particle_gas_density')] * data[('gas', 'cell_volume')]
+
+                self.ds.add_field(("deposit", "all_smoothed_mass"),
+                                  function = _mass, units = "code_mass", sampling_type = "cell")
+
+                def _radius(field, data):
+                    return data[('index', 'radius')]
+
+                self.ds.add_field(("deposit", "mesh_radius"),
+                                  function = _radius, units = "cm", sampling_type = "cell")
+
+
+                radius, bv = BV_obj.get_bv_yt(self.ds, dr = dr, rmax = rmax, rsh = rsh)
+
+            return radius, bv
+
     def plot_evolution(self, quant, tscale = "pb", ax = None, labels = None, **kwargs):
         """
         Plot the evolution of quantity.
@@ -508,7 +602,7 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
             labels = labels,
 
         # load data
-        data_all = [self.__get_evolution(q, tscale)  for q in quant]
+        data_all = [self._get_evolution(q, tscale)  for q in quant]
 
         # plot
         if ax is None:
@@ -568,7 +662,7 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         """
         Plot the GW strains
         """
-        gw_strain = self._calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
+        gw_strain = self.calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
 
         # plot
         if ax is None:
@@ -587,14 +681,14 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         if fig is not None:
             return fig, ax
 
-    def plot_gw_spectrum(self, phi, theta, dist = 10, mode = "both", method = "moore14",
+    def plot_gw_spectrum(self, phi, theta, dist = 10, mode = "both", method = "periodogram",
                          dt = None, tstart = None, tend = None, ax = None, **kwargs):
         """
         Plot the spectra of GW strains
         """
         assert method in ["kcpan", "moore14", "periodogram"], "Unknown method: {}.".format(method)
 
-        gw_strain = self._calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
+        gw_strain = self.calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
         gw_time   = self.radgrav["t"] - self.pb_time
 
         if method == "periodogram":
@@ -635,7 +729,7 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         """
         assert method in ["fft", "stft"], "Unknown method: {}.".format(method)
 
-        gw_strain = self._calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
+        gw_strain = self.calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
         gw_time   = self.radgrav["t"] - self.pb_time
 
         if method == "fft":
@@ -707,10 +801,8 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         """
         assert method in ["fft", "stft"], "Unknown method: {}.".format(method)
 
-        gw_strain = self._calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
+        gw_strain = self.calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
         gw_time   = self.radgrav["t"] - self.pb_time
-
-        gw_strain = self._calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
 
         if method == "fft":
             times, freq, spectrogram = calc_spectrogram_fft(gw_time, gw_strain,
@@ -770,7 +862,6 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         ax2.set_xlabel(label_x, size = 24)
         ax2.set_ylabel("Frequency [Hz]", labelpad = 20, size = 24)
         ax2.set_ylim([0, fmax])
-#        ax2.set_yticks([0, 1000, 2000, 3000])
 
         # colorbar
         ax3 = plt.subplot(gs[3])
@@ -789,4 +880,48 @@ class sphynx(sphynx_loader, sphynx_binary, sphynx_par):
         plt.setp(ax1.get_xticklabels(), fontsize = 20)
 
         return fig, gs
+
+    def plot_bv(self, tend = None,
+                dr = 1e5, rmax = 2e7, rsh = None, method = "binary", bin_data = False, neos = None,
+                ax = None, **kwargs):
+        # plot the bv after core bounce in contour plot
+        # in certain range (tstart, tend), where tstart = max(core bounce, tstart), tend = min(tend, last time
+        #
+        # use bisect to find the nout list
+        # prepare the input nout and time for visualization
+        nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
+        times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
+
+        if tend is not None:
+            # trim data if tend is specified
+            idx_trim = bisect(times, tend)
+
+            nouts = nouts[:idx_trim]
+            times = times[:idx_trim]
+
+        # calculate BV freq
+        radial, bv = self.calc_BV_frequency(nouts, dr = dr, rmax = rmax, rsh = rsh, method = method, neos = neos)
+
+        # plot here
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = None
+
+        times, radial = np.meshgrid(times, radial)
+
+        vmin, vmax = bv.min(), bv.max()
+        norm = DivergingNorm(vmin = vmin, vcenter = 0, vmax = vmax)
+
+        im = ax.pcolormesh(times, radial / 1e5, bv.T,
+                           shading = "gouraud", cmap = "bwr",
+                           vmin = vmin, vmax = vmax, norm = norm, **kwargs)
+
+        ax.set_xlabel("Time [ms]")
+        ax.set_ylabel("Radius [km]")
+
+        cbar = plt.colorbar(im, ax = ax, pad = 0.02)
+        cbar.set_label(r"$\omega_\mathrm{BV}$ [ms$^{-1}$]", rotation = 270, labelpad = 20)
+
+        return fig, ax
 
