@@ -60,6 +60,20 @@ class sphynx_ascii():
         self.time           = None
         self.time_rel       = None  # time relative to bounce
 
+        self.ascii_loader = {"central_values": self.get_central_values,
+                             "luminosity":     self.get_luminosity,
+                             "radgrav":        self.get_radgrav        }
+
+    def _get_ascii_table(self, key):
+        assert key in ["central_values", "luminosity", "radgrav"], "Unknown key: {}".format(key)
+
+        if key == "central_values":
+            return self.central_values
+        elif key == "luminosity":
+            return self.luminosity
+        elif key == "radgrav":
+            return self.radgrav
+
     def get_bounce(self):
         # load postbounce time in bounce.d
         try:
@@ -138,7 +152,7 @@ class sphynx_binary():
         if fn != self.binary_fn:
             self.binary    = np.fromfile(fn, dtype = fmt_binary)
             self.binary_fn = fn
-            print("File {} is loaded.".format(self.binary_fn))
+            print("File {} is loaded.".format(self.binary_fn), flush = True)
 
     def create_yt_obj(self, fn, n_ref = 64):
         # create a yt object using data in binary files
@@ -171,7 +185,7 @@ class sphynx_binary():
         # Otherwise the ds object would not have the attribute field_info
         self.ds.field_list;
 
-        print("File {} is ported into yt object self.ds.".format(self.binary_fn))
+        print("File {} is ported into yt object self.ds.".format(self.binary_fn), flush = True)
 
     def add_yt_smoothed_field(self, quant, kernel = "cubic"):
         # add yt derived, smoothed field
@@ -275,7 +289,7 @@ class sphynx_par():
                 try:
                     exec(expr)
                 except SyntaxError:
-                    print("Unknown parameter setting in {}: {}".format(fn, expr))
+                    print("Unknown parameter setting in {}: {}".format(fn, expr), flush = True)
                     continue
 
                 # store to self.par
@@ -336,28 +350,20 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             radgrav.d
         """
         if quant in quant_central:
-            if self.central_values is None:
-                self.get_central_values()
-
-            time = self.central_values["t"]
-            data = self.central_values[quant]
-
+            key = "central_values"
         elif quant in quant_lumin:
-            if self.luminosity is None:
-                self.get_luminosity()
-
-            time = self.luminosity["t"]
-            data = self.luminosity[quant]
-
+            key = "luminosity"
         elif quant in quant_radgrav:
-            if self.radgrav is None:
-                self.get_radgrav()
-
-            time = self.radgrav["t"]
-            data = self.radgrav[quant]
-
+            key = "radgrav"
         else:
             raise ValueError("Unknown quantity: {}".format(quant))
+
+        if not self._get_ascii_table(key):
+            self.ascii_loader[key]()
+
+        table = self._get_ascii_table(key)
+        time  = table["t"]
+        data  = table[quant]
 
         if tscale == "pb":
             time = time - self.pb_time
@@ -388,13 +394,17 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             return r"Time [ms]"
 
     def _get_gw_text(self, mode):
-        assert mode in ["plus", "cross", "both"], "Unknown mode: {}".format(mode)
-
         return self.gw_text[mode]
 
     def _get_gw_ylabel(self, mode):
         # choose the y label for gw plot
         return r"$10^{21}$" + self._get_gw_text(mode)
+
+    def _create_figure(self, ax):
+        if ax is None:
+            return plt.subplots()  # create a new figure and axes object
+        else:
+            return None, ax        # do noting
 
     def calc_gw_strain(self, phi, theta, dist = 10, mode = "both"):
         """
@@ -513,7 +523,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
                 f.write(data_prefix + "  ".join(data) + "\n")
 
-        print("Output file: {}".format(fnout))
+        print("Output file: {}".format(fnout), flush = True)
 
     def calc_BV_frequency(self, nout, dr = 1e5, rmax = 2e7, rsh = None,
                           method = "binary", bin_data = False, neos = None):
@@ -691,10 +701,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         data_all = [self._get_evolution(q, tscale)  for q in quant]
 
         # plot
-        if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = None
+        fig, ax = self._create_figure(ax)
 
         for (time, data), label in zip(data_all, labels):
             ax.plot(time * sec2ms, data, label = label, **kwargs)
@@ -726,10 +733,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         assert y in quant_binary,       "Unknown variable {}.".format(y)
 
         # plot
-        if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = None
+        fig, ax = self._create_figure(ax)
 
         ax.plot(xfac * self.binary[x], yfac * self.binary[y], label = label, **kwargs)
 
@@ -751,10 +755,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         gw_strain = self.calc_gw_strain(phi = phi, theta = theta, dist = dist, mode = mode)
 
         # plot
-        if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = None
+        fig, ax = self._create_figure(ax)
 
         ax.plot((self.radgrav["t"] - self.pb_time) * sec2ms, gw_strain * 1e21, **kwargs)
 
@@ -786,11 +787,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                                              tstart = tstart, tend = tend, dt = dt)
 
         # plot
-        if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = None
-
+        fig, ax  = self._create_figure(ax)
         label_y  = self._get_gw_text(mode)
         label_y += "$_{,\mathrm{char}}$"  if "_" in label_y  else "$_{\mathrm{char}}$"
 
@@ -828,10 +825,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                                                              dt = dt)
 
         # plot
-        if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = None
+        fig, ax = self._create_figure(ax)
 
         if method == "fft":
             img = ax.imshow(spectrogram.T,
@@ -969,13 +963,20 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
     def plot_profile_evol(self, quant, tend = None, dr = 1e5, rmax = 2e7, rsh = None,
                           method = "binary", bin_data = False, neos = None,
-                          ax = None, **kwargs):
+                          ax = None, vminmax = None, **kwargs):
         """
         Plot the evolution of derived profile after core bounce in contour plot
         in certain range (tstart, tend), where tstart = max(core bounce, tstart) and tend = min(tend, last time).
 
-        Support quantity: Brunt-Vaisala frequency   (quant = "bv")
-                          Solberg-Hoiland criterion (quant = "sh")
+        TODO:
+            for method = "sph", the radius is not fixed and thus incorrect
+
+        Parameters
+        ----------
+        quant: quantity to be plotted
+               Support quantity: Brunt-Vaisala frequency   (quant = "bv")
+                                 Solberg-Hoiland criterion (quant = "sh")
+        vminmax: the vmin and vmax, where vmin = -vminmax and vmax = vminmax
         """
         assert quant in ["bv", "sh"], "Unknown quantity: {}".format(quant)
 
@@ -999,14 +1000,15 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                             method = method, bin_data = bin_data, neos = neos)
 
         # plot here
-        if ax is None:
-            fig, ax = plt.subplots()
-        else:
-            fig = None
+        fig, ax = self._create_figure(ax)
 
         times, radial = np.meshgrid(times, radial)
 
-        vmin, vmax = data.min(), data.max()
+        if vminmax:
+            vmin, vmax = -vminmax, vminmax
+        else:
+            vmin, vmax = data.min(), data.max()
+
         norm = DivergingNorm(vmin = vmin, vcenter = 0, vmax = vmax)
 
         im = ax.pcolormesh(times, radial / 1e5, data.T,
@@ -1021,7 +1023,11 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         elif quant == "sh":
             cb_label = r"$R_\mathrm{SH}$ [ms$^{-2}$]"
 
-        cbar = plt.colorbar(im, ax = ax, pad = 0.02)
+        if vminmax:
+            cbar = plt.colorbar(im, ax = ax, pad = 0.02, extend = "both")
+        else:
+            cbar = plt.colorbar(im, ax = ax, pad = 0.02)
+
         cbar.set_label(cb_label, rotation = 270, labelpad = 20)
 
         if fig is not None:

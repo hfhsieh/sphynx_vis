@@ -205,11 +205,12 @@ class SH_criterion():
         dwdr[-1]   =       (xomega[-1] - xomega[ -2]) / dr
 
         mass   = 4.0 * np.pi * dr * np.cumsum(xdens * xradius**2)
-        dphidr = -const_G * mass / xradius**2
+        dphidr = const_G * mass / xradius**2
 
         ### calculate the SH criterion
         cL   = -drhodp * (dpds * dsdr + dpdye * dydr)
-        R_SH = -1e-6 * cL * dphidr / xdens + 2.0 * xomega * (xradius * dwdr + 2.0 * xomega)  # [ms^-2]
+        R_SH = -cL * dphidr / xdens + 2.0 * xomega * (xradius * dwdr + 2.0 * xomega)  # [s^-2]
+        R_SH *= 1e-6  # [ms^-2]
 
         R_SH = np.where(xradius <= rsh, R_SH, np.NaN)
 
@@ -253,7 +254,7 @@ class SH_criterion():
         dydr = calc_sph_radgrad_kdtree(xye,    x, y, z, xradius, h, xdens, parmass, kernel)
         dwdr = calc_sph_radgrad_kdtree(xomega, x, y, z, xradius, h, xdens, parmass, kernel)  # d\omega / dr
 
-        dphidr = -const_G * mass / xradius**2
+        dphidr = const_G * mass / xradius**2
 
         drhodp = np.array( [ self._get_drhodp(d, s, ye)  for d, s, ye in zip(xdens, xentr, xye) ] )
         dpds   = np.array( [ self._get_dpds  (d, s, ye)  for d, s, ye in zip(xdens, xentr, xye) ] )
@@ -271,8 +272,9 @@ class SH_criterion():
                 print("Found nan in dpdye")
 
         ### calculate the SH criterion
-        cL   = -drhodp * (dpds * dsdr + dpdye * dydr)
-        R_SH = -1e-6 * cL * dphidr / xdens + 2.0 * xomega * (xradius * dwdr + 2.0 * xomega)  # [ms^-2]
+        cL    = -drhodp * (dpds * dsdr + dpdye * dydr)
+        R_SH  = -cL * dphidr / xdens + 2.0 * xomega * (xradius * dwdr + 2.0 * xomega)  # [s^-2]
+        R_SH *= 1e-6  # [ms^-2]
 
         R_SH = np.where(xradius <= rsh, R_SH, np.NaN)
 

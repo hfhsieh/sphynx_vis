@@ -123,7 +123,7 @@ class RadialProfile():
 
             # do interpolation
             prof[~is_nonzero]  = inte_linear(self.radius[~is_nonzero])
-            self.profiles[var] = prof
+            self.profiles[q] = prof
 
         if self.verbose:
             print("Finish removing empty bins")
