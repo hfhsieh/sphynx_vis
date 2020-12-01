@@ -5,7 +5,7 @@
 #  Purpose:
 #    Class objects that contains functions for visualizing SPHYNX resutls
 #
-#  Last Updated: 2020/11/29
+#  Last Updated: 2020/12/01
 #  He-Feng Hsieh
 
 
@@ -26,6 +26,7 @@ from .fmt import *
 from .lib_gw import *
 from .lib_kernels import *
 from .lib_BV import BV_frequency
+from .lib_SH import SH_criterion
 
 
 # physcial constant
@@ -153,7 +154,7 @@ class sphynx_binary():
                 'smoothing_length':         self.binary["h"],
                 'particle_gas_density':     self.binary["promro"],
                 'particle_gas_temperature': self.binary["temp"],
-                'particle_mass':            self.calc_parmass()    }
+                'particle_mass':            self.calc_parmass()   }
 
         var_known = set(["x", "y", "z", "vx", "vy", "vz", "idx", "h", "promro", "temp"])
 
@@ -161,8 +162,7 @@ class sphynx_binary():
             if var not in var_known:
                 data[var] = self.binary[var]
 
-        bbox = np.array([(self.binary[idx].min(), self.binary[idx].max())
-                         for idx in "xyz"])
+        bbox = np.array( [ (self.binary[idx].min(), self.binary[idx].max())  for idx in "xyz" ] )
 
         self.ds = yt.load_particles(data, n_ref = n_ref, bbox = bbox,
                                     length_unit = yt.units.cm, mass_unit = yt.units.g, time_unit = yt.units.s)
@@ -294,6 +294,10 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
     """
     Contains functions for visualization
     """
+    gw_text = {"plus" : r"$h_\plus$",
+               "cross": r"$h_\mathrm{x}$",
+               "both" : r"$h$"             }
+
     def __init__(self, rundir, runpath, load_eos = False):
         sphynx_ascii.__init__(self, rundir = rundir, runpath = runpath)
         sphynx_binary.__init__(self, rundir = rundir, runpath = runpath)
@@ -386,12 +390,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
     def _get_gw_text(self, mode):
         assert mode in ["plus", "cross", "both"], "Unknown mode: {}".format(mode)
 
-        if mode == "plus":
-            return r"$h_\plus$"
-        elif mode == "cross":
-            return r"$h_\mathrm{x}$"
-        else:
-            return r"$h$"
+        return self.gw_text[mode]
 
     def _get_gw_ylabel(self, mode):
         # choose the y label for gw plot
@@ -527,7 +526,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         rsh: shock radius. Set to rmax if not specified
         method: if method == "yt"    : using binned yt-redndering meshgrid data
                              "binary": using binned SPHYNX's binary output
-                             "sph"   : using SPHYNX's binary output, and SPH formalism for gradient
+                             "sph"   : using SPHYNX's binary output and SPH formalism for gradient
         bin_data: Boolean. Only works if method == "sph"
                   If True, the bv from "sph" method is binned
         """
@@ -546,7 +545,8 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             BV_freq = [None] * len(nout)
 
             for idx, n in enumerate(nout):
-                radius, bv = self.calc_BV_frequency(n, dr = dr, rmax = rmax, rsh = rsh, method = method, neos = neos)
+                radius, bv = self.calc_BV_frequency(n, dr = dr, rmax = rmax, rsh = rsh,
+                                                    method = method, bin_data = bin_data, neos = neos)
                 BV_freq[idx] = bv
 
             return radius, np.array(BV_freq)
@@ -558,12 +558,21 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                 self.get_profile(nout)
                 radius, bv = BV_obj.get_bv_sphynx_bin(self.binary, dr = dr, rmax = rmax, rsh = rsh)
             elif method == "sph":
+                self.get_profile(nout)
                 radius, bv = BV_obj.get_bv_sphynx_sph(self.binary, dr = dr, rmax = rmax, rsh = rsh,
                                                       kernel_idx = self.getpar("kernel"), bin_data = bin_data)
             else:
                 self.get_ytobj(nout)
 
-                # create needed derived fields
+                ### create needed derived fields
+                # radius of each meshgrid
+                def _radius(field, data):
+                    return data[('index', 'radius')]
+
+                self.ds.add_field(("deposit", "mesh_radius"),
+                                  function = _radius, units = "cm", sampling_type = "cell")
+
+                # smoothed field
                 for quant in ["particle_gas_density", "s", "ye"]:
                     self.add_yt_smoothed_field(quant)
 
@@ -573,16 +582,93 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                 self.ds.add_field(("deposit", "all_smoothed_mass"),
                                   function = _mass, units = "code_mass", sampling_type = "cell")
 
+                radius, bv = BV_obj.get_bv_yt(self.ds, dr = dr, rmax = rmax, rsh = rsh)
+
+            return radius, bv
+
+    def calc_SH_criterion(self, nout, dr = 1e5, rmax = 2e7, rsh = None,
+                          method = "binary", bin_data = False, neos = None):
+        """
+        Parameters
+        ----------
+        nout: scalar or sequence of output indices
+        dr: the bin width and the center of lowest bin
+        rmax: the center of highest bin
+        rsh: shock radius. Set to rmax if not specified
+        method: if method == "yt"    : using binned yt-redndering meshgrid data
+                             "binary": using binned SPHYNX's binary output
+                             "sph"   : using SPHYNX's binary output and SPH formalism for gradient
+        bin_data: Boolean. Only works if method == "sph"
+                  If True, the R_SH from "sph" method is binned
+        """
+        assert method in ["binary", "yt", "sph"], "Unknown method: {}".format(method)
+
+        if neos is None:
+            if self.neos is None:
+                raise ValueError ("No nuclear EoS table specified! "
+                                  "Run self._load_eostable() to load table "
+                                  "or assign a NuclearEOS instance to 'neos'.")
+            else:
+                neos = self.neos
+
+        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+            SH_crit = [None] * len(nout)
+
+            for idx, n in enumerate(nout):
+                radius, sh = self.calc_SH_criterion(n, dr = dr, rmax = rmax, rsh = rsh,
+                                                    method = method, bin_data = bin_data, neos = neos)
+                SH_crit[idx] = sh
+
+            return radius, np.array(SH_crit)
+
+        else: # case: one nout specified
+            SH_obj  = SH_criterion(neos)
+
+            if method == "binary":
+                self.get_profile(nout)
+                self.binary["dummy1"] = self.calc_omega()  # compute omega and store into dummy1
+                radius, sh = SH_obj.get_sh_sphynx_bin(self.binary, dr = dr, rmax = rmax, rsh = rsh)
+            elif method == "sph":
+                self.get_profile(nout)
+                self.binary["dummy1"] = self.calc_omega()  # compute omega and store into dummy1
+                radius, sh = SH_obj.get_sh_sphynx_sph(self.binary, dr = dr, rmax = rmax, rsh = rsh,
+                                                      kernel_idx = self.getpar("kernel"), bin_data = bin_data)
+            else:
+                self.get_ytobj(nout)
+
+                ### create needed derived fields
+                # radius of each meshgrid
                 def _radius(field, data):
                     return data[('index', 'radius')]
 
                 self.ds.add_field(("deposit", "mesh_radius"),
                                   function = _radius, units = "cm", sampling_type = "cell")
 
+                # omega: angular velocity about the z direction
+                def _omega(field, data):
+                    x  = ("all", "particle_position_x")
+                    y  = ("all", "particle_position_y")
+                    vx = ("all", "particle_velocity_x")
+                    vy = ("all", "particle_velocity_y")
 
-                radius, bv = BV_obj.get_bv_yt(self.ds, dr = dr, rmax = rmax, rsh = rsh)
+                    return (data[vx] * data[y] - data[vy] * data[x]) / (data[x]**2 + data[y]**2)
 
-            return radius, bv
+                self.ds.add_field(("all", "omega_phi"),
+                                  function = _omega, units = "cm/(code_length*s)", particle_type = True)
+
+                # smoothed field
+                for quant in ["particle_gas_density", "s", "ye", "omega_phi"]:
+                    self.add_yt_smoothed_field(quant)
+
+                def _mass(field, data):
+                    return data[('deposit', 'all_smoothed_particle_gas_density')] * data[('gas', 'cell_volume')]
+
+                self.ds.add_field(("deposit", "all_smoothed_mass"),
+                                  function = _mass, units = "code_mass", sampling_type = "cell")
+
+                radius, sh = SH_obj.get_sh_yt(self.ds, dr = dr, rmax = rmax, rsh = rsh)
+
+            return radius, sh
 
     def plot_evolution(self, quant, tscale = "pb", ax = None, labels = None, **kwargs):
         """
@@ -693,11 +779,11 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
         if method == "periodogram":
             freq, hchar  = calc_spectrum_periodogram(gw_time, gw_strain,
-                                                    tstart = tstart, tend = tend, dt = dt)
+                                                     tstart = tstart, tend = tend, dt = dt)
         else:
             freq, hchar  = calc_spectrum_fft(gw_time, gw_strain,
-                                            method = method, dist = dist,
-                                            tstart = tstart, tend = tend, dt = dt)
+                                             method = method, dist = dist,
+                                             tstart = tstart, tend = tend, dt = dt)
 
         # plot
         if ax is None:
@@ -881,14 +967,18 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
         return fig, gs
 
-    def plot_bv(self, tend = None,
-                dr = 1e5, rmax = 2e7, rsh = None, method = "binary", bin_data = False, neos = None,
-                ax = None, **kwargs):
-        # plot the bv after core bounce in contour plot
-        # in certain range (tstart, tend), where tstart = max(core bounce, tstart), tend = min(tend, last time
-        #
-        # use bisect to find the nout list
-        # prepare the input nout and time for visualization
+    def plot_profile_evol(self, quant, tend = None, dr = 1e5, rmax = 2e7, rsh = None,
+                          method = "binary", bin_data = False, neos = None,
+                          ax = None, **kwargs):
+        """
+        Plot the evolution of derived profile after core bounce in contour plot
+        in certain range (tstart, tend), where tstart = max(core bounce, tstart) and tend = min(tend, last time).
+
+        Support quantity: Brunt-Vaisala frequency   (quant = "bv")
+                          Solberg-Hoiland criterion (quant = "sh")
+        """
+        assert quant in ["bv", "sh"], "Unknown quantity: {}".format(quant)
+
         nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
         times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
 
@@ -899,8 +989,14 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             nouts = nouts[:idx_trim]
             times = times[:idx_trim]
 
-        # calculate BV freq
-        radial, bv = self.calc_BV_frequency(nouts, dr = dr, rmax = rmax, rsh = rsh, method = method, neos = neos)
+        # obtain the data
+        if quant == "bv":
+            func = self.calc_BV_frequency
+        elif quant == "sh":
+            func = self.calc_SH_criterion
+
+        radial, data = func(nouts, dr = dr, rmax = rmax, rsh = rsh,
+                            method = method, bin_data = bin_data, neos = neos)
 
         # plot here
         if ax is None:
@@ -910,18 +1006,24 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
         times, radial = np.meshgrid(times, radial)
 
-        vmin, vmax = bv.min(), bv.max()
+        vmin, vmax = data.min(), data.max()
         norm = DivergingNorm(vmin = vmin, vcenter = 0, vmax = vmax)
 
-        im = ax.pcolormesh(times, radial / 1e5, bv.T,
+        im = ax.pcolormesh(times, radial / 1e5, data.T,
                            shading = "gouraud", cmap = "bwr",
                            vmin = vmin, vmax = vmax, norm = norm, **kwargs)
 
         ax.set_xlabel("Time [ms]")
         ax.set_ylabel("Radius [km]")
 
-        cbar = plt.colorbar(im, ax = ax, pad = 0.02)
-        cbar.set_label(r"$\omega_\mathrm{BV}$ [ms$^{-1}$]", rotation = 270, labelpad = 20)
+        if quant == "bv":
+            cb_label = r"$\omega_\mathrm{BV}$ [ms$^{-1}$]"
+        elif quant == "sh":
+            cb_label = r"$R_\mathrm{SH}$ [ms$^{-2}$]"
 
-        return fig, ax
+        cbar = plt.colorbar(im, ax = ax, pad = 0.02)
+        cbar.set_label(cb_label, rotation = 270, labelpad = 20)
+
+        if fig is not None:
+            return fig, ax
 
