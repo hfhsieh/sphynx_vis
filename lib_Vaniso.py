@@ -108,17 +108,17 @@ class Vaniso():
         inte_vt = interp1d(radius, vtheta_ave, fill_value = "extrapolate")
         inte_vp = interp1d(radius, vphi_ave,   fill_value = "extrapolate")
 
-        variance = ( data["vr"] - inte_vr( ds_or_binary["radius"] ) )**2
+        variance = ( data["vr"] - inte_vr( data["radius"] ) )**2
 
         if include_vtheta:
             if include_vtheta_ave:
-                variance += ( data["vtheta"] - inte_vt( ds_or_binary["radius"] ) )**2
+                variance += ( data["vtheta"] - inte_vt( data["radius"] ) )**2
             else:
                 variance += ( data["vtheta"] )**2
 
         if include_vphi:
             if include_vphi_ave:
-                variance += ( data["vphi"] - inte_vp( ds_or_binary["radius"] ) )**2
+                variance += ( data["vphi"] - inte_vp( data["radius"] ) )**2
             else:
                 variance += ( data["vphi"] )**2
 
