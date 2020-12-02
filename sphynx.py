@@ -27,6 +27,7 @@ from .lib_gw import *
 from .lib_kernels import *
 from .lib_BV import BV_frequency
 from .lib_SH import SH_criterion
+from .lib_Vaniso import Vaniso
 
 
 # physcial constant
@@ -526,7 +527,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         print("Output file: {}".format(fnout), flush = True)
 
     def calc_BV_frequency(self, nout, dr = 1e5, rmax = 2e7, rsh = None,
-                          method = "binary", bin_data = False, neos = None):
+                          method = "binary", bin_data = False, neos = None, **kwargs):
         """
         Parameters
         ----------
@@ -597,7 +598,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             return radius, bv
 
     def calc_SH_criterion(self, nout, dr = 1e5, rmax = 2e7, rsh = None,
-                          method = "binary", bin_data = False, neos = None):
+                          method = "binary", bin_data = False, neos = None, **kwargs):
         """
         Parameters
         ----------
@@ -679,6 +680,36 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                 radius, sh = SH_obj.get_sh_yt(self.ds, dr = dr, rmax = rmax, rsh = rsh)
 
             return radius, sh
+
+    def calc_vaniso(self, nout, dr = 1e5, rmax = 2e7, rsh = None, method = "binary", **kwargs):
+        """
+        Parameters
+        ----------
+        nout: scalar or sequence of output indices
+        dr: the bin width and the center of lowest bin
+        rmax: the center of highest bin
+        rsh: shock radius. Set to rmax if not specified
+        method: if method == "binary": using binned SPHYNX's binary output
+        """
+        assert method in ["binary"], "Unknown method: {}".format(method)
+
+        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+            vaniso = [None] * len(nout)
+
+            for idx, n in enumerate(nout):
+                radius, v_std = self.calc_vaniso(n, dr = dr, rmax = rmax, rsh = rsh, method = method)
+                vaniso[idx] = v_std
+
+            return radius, np.array(vaniso)
+
+        else: # case: one nout specified
+            Vaniso_obj  = Vaniso()
+
+            if method == "binary":
+                self.get_profile(nout)
+                radius, v_std = Vaniso_obj.get_vaniso_sphynx_bin(self.binary, dr = dr, rmax = rmax, rsh = rsh)
+
+            return radius, v_std
 
     def plot_evolution(self, quant, tscale = "pb", ax = None, labels = None, **kwargs):
         """
@@ -963,6 +994,8 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
     def plot_profile_evol(self, quant, tend = None, dr = 1e5, rmax = 2e7, rsh = None,
                           method = "binary", bin_data = False, neos = None,
+                          include_vphi = False, include_vphi_ave = False,
+                          include_vtheta = False, include_vtheta_ave = False,
                           ax = None, vminmax = None, **kwargs):
         """
         Plot the evolution of derived profile after core bounce in contour plot
@@ -978,7 +1011,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                                  Solberg-Hoiland criterion (quant = "sh")
         vminmax: the vmin and vmax, where vmin = -vminmax and vmax = vminmax
         """
-        assert quant in ["bv", "sh"], "Unknown quantity: {}".format(quant)
+        assert quant in ["bv", "sh", "vaniso"], "Unknown quantity: {}".format(quant)
 
         nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
         times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
@@ -990,14 +1023,21 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             nouts = nouts[:idx_trim]
             times = times[:idx_trim]
 
-        # obtain the data
+        # obtain the data and setting cmap
         if quant == "bv":
             func = self.calc_BV_frequency
+            cmap = "bwr"
         elif quant == "sh":
             func = self.calc_SH_criterion
+            cmap = "bwr_r"
+        elif quant == "vaniso":
+            func = self.calc_vaniso
+            cmap = "rainbow"
 
         radial, data = func(nouts, dr = dr, rmax = rmax, rsh = rsh,
-                            method = method, bin_data = bin_data, neos = neos)
+                            method = method, bin_data = bin_data, neos = neos,
+                            include_vphi = include_vphi, include_vphi_ave = include_vphi_ave,
+                            include_vtheta = include_vtheta, include_vtheta_ave = include_vtheta_ave)
 
         # plot here
         fig, ax = self._create_figure(ax)
@@ -1009,10 +1049,13 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         else:
             vmin, vmax = data.min(), data.max()
 
-        norm = DivergingNorm(vmin = vmin, vcenter = 0, vmax = vmax)
+        if quant == "vaniso":
+            norm = None
+        else:
+            norm = DivergingNorm(vmin = vmin, vcenter = 0, vmax = vmax)
 
         im = ax.pcolormesh(times, radial / 1e5, data.T,
-                           shading = "gouraud", cmap = "bwr",
+                           shading = "gouraud", cmap = cmap,
                            vmin = vmin, vmax = vmax, norm = norm, **kwargs)
 
         ax.set_xlabel("Time [ms]")
@@ -1022,6 +1065,8 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             cb_label = r"$\omega_\mathrm{BV}$ [ms$^{-1}$]"
         elif quant == "sh":
             cb_label = r"$R_\mathrm{SH}$ [ms$^{-2}$]"
+        elif quant == "vaniso":
+            cb_label = r"$v_\mathrm{aniso}$ [$c$]"
 
         if vminmax:
             cbar = plt.colorbar(im, ax = ax, pad = 0.02, extend = "both")
