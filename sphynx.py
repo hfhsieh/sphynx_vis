@@ -140,6 +140,8 @@ class sphynx_binary():
         self.binary_fn = None
         self.ds        = None
 
+        self.verbose = False
+
     def get_all_binary(self, directory = "data"):
         # return the index of all binary files in directory
         fn_list  = glob(os.path.join(self.path, directory, "*"))
@@ -153,7 +155,8 @@ class sphynx_binary():
         if fn != self.binary_fn:
             self.binary    = np.fromfile(fn, dtype = fmt_binary)
             self.binary_fn = fn
-            print("File {} is loaded.".format(self.binary_fn), flush = True)
+            if self.verbose:
+                print("File {} is loaded.".format(self.binary_fn), flush = True)
 
     def create_yt_obj(self, fn, n_ref = 64):
         # create a yt object using data in binary files

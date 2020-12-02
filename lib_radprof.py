@@ -71,7 +71,7 @@ class RadialProfile():
 
             self.profiles[q] = np.array(prof)
 
-    def get_profiles(self, quant, ds = None, binary = None, check = True):
+    def get_profiles(self, quant, ds = None, binary = None, check = False):
         """
         Interface for calling the correct function to compute the profiles.
 
@@ -81,6 +81,9 @@ class RadialProfile():
         ds: yt object. If ds is given, the profiles will obtained from the yt object
         binary: data in SPHYNX's binary output
         """
+        if not isinstance(quant, (list, tuple)):
+            quant = quant,
+
         if ds is None:  # from SPHYNX's binary output
             if check:
                 # check if specified quantity is stored in the input binary data
