@@ -28,6 +28,7 @@ from .lib_kernels import *
 from .lib_BV import BV_frequency
 from .lib_SH import SH_criterion
 from .lib_Vaniso import Vaniso
+from .lib_SphHarm_decomp import SphHarm_decomp
 
 
 # physcial constant
@@ -714,6 +715,41 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
             return radius, v_std
 
+    def calc_sphharm(self, nout, dens, ls, ms, fraction = 0.01, method = "binary", **kwargs):
+        """
+        Parameters
+        ----------
+        nout: scalar or sequence of output indices
+        dens, fraction: consider the shell with density: [dens * (1 - fraction), dens * (1 + fraction)]
+        ls, ms: sequences of the spherical harmonic mode (l, m)
+        method: if method == "binary": using binned SPHYNX's binary output
+        """
+        assert method in ["binary"], "Unknown method: {}".format(method)
+
+        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+            coe = [None] * len(nout)
+
+            for idx, n in enumerate(nout):
+                coe_dict = self.calc_sphharm(n, dens, ls, ms, fraction = fraction, method = method)
+                coe[idx] = coe_dict
+
+            # combine all dictionaries into one
+            coe_all = dict()
+
+            for lm in zip(ls, ms):
+                coe_all[lm] = np.array( [dict_obj.get(lm, "None")  for dict_obj in coe] )
+
+            return coe_all
+
+        else: # case: one nout specified
+            sphharm_obj = SphHarm_decomp()
+
+            if method == "binary":
+                self.get_profile(nout)
+                coe_dict = sphharm_obj.get_sphharm_decomp_sphynx(self.binary, dens, ls, ms, fraction = fraction)
+
+            return coe_dict
+
     def plot_evolution(self, quant, tscale = "pb", ax = None, labels = None, **kwargs):
         """
         Plot the evolution of quantity.
@@ -1002,7 +1038,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                           ax = None, vminmax = None, **kwargs):
         """
         Plot the evolution of derived profile after core bounce in contour plot
-        in certain range (tstart, tend), where tstart = max(core bounce, tstart) and tend = min(tend, last time).
+        in certain range (t_pb, tend), where tend = min(tend, last time).
 
         TODO:
             for method = "sph", the radius is not fixed and thus incorrect
@@ -1019,12 +1055,11 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
         times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
 
+        # trim data if tend is specified
         if tend is not None:
-            # trim data if tend is specified
             idx_trim = bisect(times, tend)
-
-            nouts = nouts[:idx_trim]
-            times = times[:idx_trim]
+            nouts    = nouts[:idx_trim]
+            times    = times[:idx_trim]
 
         # obtain the data and setting cmap
         if quant == "bv":
@@ -1077,6 +1112,76 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             cbar = plt.colorbar(im, ax = ax, pad = 0.02)
 
         cbar.set_label(cb_label, rotation = 270, labelpad = 20)
+
+        if fig is not None:
+            return fig, ax
+
+    def plot_sphharm(self, dens, ls = None, ms = None, lms = None, fraction = 0.01, tend = None,
+                     ax = None, **kwargs):
+        """
+        Decompose the shell with density: [dens * (1 - fraction), dens * (1 + fraction)]
+        into spherical harmonic components.
+
+        Then, plot the evolution of the coefficient of specified modes
+        in certain range (t_pb, tend), where tend = min(tend, last time)
+
+        Parameters
+        ----------
+        dens, fraction: the density range to be considered
+        ls, ms: sequence of the spherical harmonic modes: l and m
+        lms: alternative way to assign ls and ms: ls, ms = zip(*lms)
+             Override ls and ms if specified.
+        """
+        assert dens * (1 - fraction) > 0.0, "Negative denisty range is specified."
+        assert (ls and ms) or (lms), "ls and ms, or lms, must be set."
+
+        nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
+        times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
+
+        # trim data if tend is specified
+        if tend is not None:
+            idx_trim = bisect(times, tend)
+            nouts    = nouts[:idx_trim]
+            times    = times[:idx_trim]
+
+        # override ls and ms if lms is assigned
+        if lms is not None:
+            if not isinstance(lms[0], (tuple, list)):
+                lms = lms,
+        else:
+            if not isinstance(ls, (tuple, list)):
+                ls = ls,
+
+            if not isinstance(ms, (tuple, list)):
+                ms = ms,
+
+            lms = tuple(zip(ls, ms))
+
+        # always calculate a_{0, 0} for normalization
+        if (0, 0) not in lms:
+            lms = *lms, (0, 0)
+
+        ls, ms = zip(*lms)
+
+        # obtain the data
+        data = self.calc_sphharm(nouts, dens, ls, ms, fraction = fraction, method = "binary")
+
+        for lm in lms:
+            data[lm] /= data[(0, 0)]  # normalized by a_{0, 0}
+
+        # plot here
+        fig, ax = self._create_figure(ax)
+
+        for lm in lms:
+            if lm == (0, 0):  # ignore a_{0, 0} case
+                continue
+
+            label = r"$a_{" + "{}{}".format(*lm) + r"}$"
+            ax.plot(times, data[lm], label = label)
+
+        ax.set_xlabel("Time [ms]")
+        ax.set_ylabel(r"$a_{lm} / a_{00}$")
+        ax.legend()
 
         if fig is not None:
             return fig, ax
