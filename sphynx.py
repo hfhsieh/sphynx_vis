@@ -5,7 +5,7 @@
 #  Purpose:
 #    Class objects that contains functions for visualizing SPHYNX resutls
 #
-#  Last Updated: 2020/12/04
+#  Last Updated: 2020/12/08
 #  He-Feng Hsieh
 
 
@@ -16,6 +16,7 @@ import numpy as np
 import matplotlib as mpl
 from glob import glob
 from bisect import bisect
+from tqdm import tqdm
 from subprocess import check_output
 from collections.abc import Iterable
 from matplotlib import pyplot as plt
@@ -514,7 +515,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
                 return np.sum(data[cond])
 
-            for nout in nouts:
+            for nout in tqdm(nouts):
                 self.get_profile(nout)
                 radius = self.binary["radius"] / 1e5  # to km
                 I_all  = self.calc_quadmom()
@@ -566,13 +567,12 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                 neos = self.neos
 
         if isinstance(nout, Iterable): # case: multiple nout specified
-#            BV_freq = dict()
-            BV_freq = [None] * len(nout)
+            res = [self.calc_BV_frequency(n, dr = dr, rmax = rmax, rsh = rsh,
+                                          method = method, bin_data = bin_data, neos = neos)
+                   for n in tqdm(nout)]
 
-            for idx, n in enumerate(nout):
-                radius, bv = self.calc_BV_frequency(n, dr = dr, rmax = rmax, rsh = rsh,
-                                                    method = method, bin_data = bin_data, neos = neos)
-                BV_freq[idx] = bv
+            radius, BV_freq = zip(*res)
+            radius = radius[0]  # assume all the radius profiles are the same
 
             return radius, np.array(BV_freq)
 
@@ -637,12 +637,12 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                 neos = self.neos
 
         if isinstance(nout, Iterable): # case: multiple nout specified
-            SH_crit = [None] * len(nout)
+            res = [self.calc_SH_criterion(n, dr = dr, rmax = rmax, rsh = rsh,
+                                          method = method, bin_data = bin_data, neos = neos)
+                   for n in tqdm(nout)]
 
-            for idx, n in enumerate(nout):
-                radius, sh = self.calc_SH_criterion(n, dr = dr, rmax = rmax, rsh = rsh,
-                                                    method = method, bin_data = bin_data, neos = neos)
-                SH_crit[idx] = sh
+            radius, SH_crit = zip(*res)
+            radius = radius[0]  # assume all the radius profiles are the same
 
             return radius, np.array(SH_crit)
 
@@ -708,11 +708,11 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         assert method in ["binary"], "Unknown method: {}".format(method)
 
         if isinstance(nout, Iterable): # case: multiple nout specified
-            vaniso = [None] * len(nout)
+            res = [self.calc_vaniso(n, dr = dr, rmax = rmax, rsh = rsh, method = method)
+                   for n in tqdm(nout)]
 
-            for idx, n in enumerate(nout):
-                radius, v_std = self.calc_vaniso(n, dr = dr, rmax = rmax, rsh = rsh, method = method)
-                vaniso[idx] = v_std
+            radius, vaniso = zip(*res)
+            radius = radius[0]  # assume all the radius profiles are the same
 
             return radius, np.array(vaniso)
 
@@ -737,11 +737,8 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         assert method in ["binary"], "Unknown method: {}".format(method)
 
         if isinstance(nout, Iterable): # case: multiple nout specified
-            coe = [None] * len(nout)
-
-            for idx, n in enumerate(nout):
-                coe_dict = self.calc_sphharm(n, dens, ls, ms, fraction = fraction, method = method)
-                coe[idx] = coe_dict
+            coe = [self.calc_sphharm(n, dens, ls, ms, fraction = fraction, method = method)
+                   for n in tqdm(nout)]
 
             # combine all dictionaries into one
             coe_all = dict()
