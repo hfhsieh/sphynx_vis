@@ -5,7 +5,7 @@
 #  Purpose:
 #    Class objects that contains functions for visualizing SPHYNX resutls
 #
-#  Last Updated: 2020/12/01
+#  Last Updated: 2020/12/04
 #  He-Feng Hsieh
 
 
@@ -17,6 +17,7 @@ import matplotlib as mpl
 from glob import glob
 from bisect import bisect
 from subprocess import check_output
+from collections.abc import Iterable
 from matplotlib import pyplot as plt
 from matplotlib import gridspec as gridspec
 from matplotlib.colors import DivergingNorm
@@ -346,6 +347,16 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             self.neos.del_table()
             self.neos = None
 
+    def _check_iterable(self, obj, index = None):
+        # check whether obj (or obj[index] if index is set) is iterable
+        # if not, convert obj to tuple
+        test_obj = obj[index]  if index  else  obj
+
+        if not isinstance(test_obj, Iterable):
+            obj = obj,
+
+        return obj
+
     def _get_evolution(self, quant, tscale = "pb"):
         """
         Get the evolution of given quantity 'quant'. Currently, only support quantities in
@@ -465,8 +476,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                 [0, r_1], [r_i, r_i+1], ..., [r_n, infinity], where all the values are in km
         fnout: string. The filename of the ASCII output
         """
-        if not isinstance(nouts, (tuple, list)):
-            nouts = nouts,
+        nouts = self._check_iterable(nouts)
 
         if fnout is None:
             fnout = "radgrav_separated.d"
@@ -555,7 +565,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             else:
                 neos = self.neos
 
-        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+        if isinstance(nout, Iterable): # case: multiple nout specified
 #            BV_freq = dict()
             BV_freq = [None] * len(nout)
 
@@ -626,7 +636,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             else:
                 neos = self.neos
 
-        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+        if isinstance(nout, Iterable): # case: multiple nout specified
             SH_crit = [None] * len(nout)
 
             for idx, n in enumerate(nout):
@@ -697,7 +707,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         """
         assert method in ["binary"], "Unknown method: {}".format(method)
 
-        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+        if isinstance(nout, Iterable): # case: multiple nout specified
             vaniso = [None] * len(nout)
 
             for idx, n in enumerate(nout):
@@ -726,7 +736,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         """
         assert method in ["binary"], "Unknown method: {}".format(method)
 
-        if isinstance(nout, (tuple, list)): # case: multiple nout specified
+        if isinstance(nout, Iterable): # case: multiple nout specified
             coe = [None] * len(nout)
 
             for idx, n in enumerate(nout):
@@ -759,13 +769,12 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         tscale: "pb": show the time scale relative to t_pb
                 Otherwise: show the physical time
         """
-        if not isinstance(quant, (tuple, list)):
-            quant = quant,
+        quant = self._check_iterable(quant)
 
         if labels is None:
             labels = quant
-        elif not isinstance(labels, (tuple, list)):
-            labels = labels,
+        else:
+            labels = self._check_iterable(labels)
 
         # load data
         data_all = [self._get_evolution(q, tscale)  for q in quant]
@@ -1146,14 +1155,10 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
 
         # override ls and ms if lms is assigned
         if lms is not None:
-            if not isinstance(lms[0], (tuple, list)):
-                lms = lms,
+            lms = self._check_iterable(lms, index = 0)
         else:
-            if not isinstance(ls, (tuple, list)):
-                ls = ls,
-
-            if not isinstance(ms, (tuple, list)):
-                ms = ms,
+            ls = self._check_iterable(ls)
+            ms = self._check_iterable(ms)
 
             lms = tuple(zip(ls, ms))
 
@@ -1177,10 +1182,70 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                 continue
 
             label = r"$a_{" + "{}{}".format(*lm) + r"}$"
-            ax.plot(times, data[lm], label = label)
+            ax.plot(times, data[lm], label = label, **kwargs)
 
         ax.set_xlabel("Time [ms]")
         ax.set_ylabel(r"$a_{lm} / a_{00}$")
+        ax.set_title("Density: {:.2e} [gram]".format(dens))
+        ax.legend()
+
+        if fig is not None:
+            return fig, ax
+
+    def plot_sphharm_amplitude(self, dens, l, fraction = 0.01, tend = None,
+                               ax = None, **kwargs):
+        """
+        Similar to plot_sphharm(), but plot the square root of the sum of the squares
+        of the a_{l, m}, sqrt( P(l) ), for the given l and density.
+
+            P(l) = sum_{m = -l, ..., l} a_{l, m}^2
+
+        Parameters
+        ----------
+        dens, fraction: the density range to be considered
+        l: the spherical harmonic modes: l
+        """
+        assert l > 0, "Invalid l: {}".format(l)  # l = 0 is meaningless
+
+        dens = self._check_iterable(dens)
+        dens = sorted(dens)
+
+        for d in dens:
+            assert d * (1 - fraction) > 0.0, "Negative denisty range is specified."
+
+        nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
+        times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
+
+        # trim data if tend is specified
+        if tend is not None:
+            idx_trim = bisect(times, tend)
+            nouts    = nouts[:idx_trim]
+            times    = times[:idx_trim]
+
+        lms = [(l, m)  for m in range(-l, l + 1)] + [(0, 0)]
+        ls, ms = zip(*lms)
+
+        # obtain the data
+        data_all = list()
+
+        for d in dens:
+            coe_all = self.calc_sphharm(nouts, d, ls, ms, fraction = fraction, method = "binary")
+
+            # compute P(l) and sqrt( P(l) )
+            P_l = np.sum( [coe * coe  for lm, coe in coe_all.items()  if lm[0] == l], axis = 0 )
+            a_l = np.sqrt(P_l) / coe_all[(0, 0)]  # normalized by a_0
+
+            data_all.append(a_l)
+
+        # plot here
+        fig, ax = self._create_figure(ax)
+
+        for d, data in zip(dens, data_all):
+            label = r"$\rho = $" + "{:.1e}".format(d)
+            ax.plot(times, data, label = label, **kwargs)
+
+        ax.set_xlabel("Time [ms]")
+        ax.set_ylabel("$a_{}".format(l) + "/ a_{0}$")
         ax.legend()
 
         if fig is not None:

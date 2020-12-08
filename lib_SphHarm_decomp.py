@@ -9,7 +9,7 @@
 #  Reference:
 #    Burrows+, 2012, ApJ, 759, 5
 #
-#  Last Updated: 2020/12/02
+#  Last Updated: 2020/12/04
 #  He-Feng Hsieh
 
 
@@ -107,6 +107,7 @@ class SphHarm_decomp():
         dmax = dens * (1 + fraction)
 
         idx = np.where((dmin <= binary["promro"]) & (binary["promro"] <= dmax))[0]
+#        print("Number of particles in the shell: {}".format(idx.size))
 
         radius, theta, phi = self.cart2sph_pos(binary["x"][idx],
                                                binary["y"][idx],
