@@ -5,7 +5,7 @@
 #  Purpose:
 #    Class objects that contains functions for visualizing SPHYNX resutls
 #
-#  Last Updated: 2020/12/08
+#  Last Updated: 2020/12/21
 #  He-Feng Hsieh
 
 
@@ -18,11 +18,12 @@ from glob import glob
 from bisect import bisect
 from tqdm import tqdm
 from subprocess import check_output
-from collections.abc import Iterable
+from scipy.interpolate import interp1d
 from matplotlib import pyplot as plt
 from matplotlib import gridspec as gridspec
 from matplotlib.colors import DivergingNorm
 from yt.fields.particle_fields import add_volume_weighted_smoothed_field
+#from labellines import labelLines
 from NuclearEos import NuclearEOS
 from .fmt import *
 from .lib_gw import *
@@ -32,6 +33,8 @@ from .lib_SH import SH_criterion
 from .lib_Vaniso import Vaniso
 from .lib_SphHarm_decomp import SphHarm_decomp
 
+
+Iterable = tuple, list, np.ndarray
 
 # physcial constant
 const_G = 6.67428e-8
@@ -90,6 +93,7 @@ class sphynx_ascii():
             self.pb      = False
 
     def get_central_values(self):
+        # TODO: the data could be duplicate
         fn = os.path.join(self.path, "central_values.d")
         self.central_values = np.genfromtxt(fn, dtype = fmt_central_values)
 
@@ -349,14 +353,25 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             self.neos = None
 
     def _check_iterable(self, obj, index = None):
-        # check whether obj (or obj[index] if index is set) is iterable
-        # if not, convert obj to tuple
-        test_obj = obj[index]  if index  else  obj
+        """
+        check whether obj (or obj[index] if index is set) is iterable
+        if not, convert obj to tuple
+        """
+        test_obj = obj  if index is None else  obj[index]
 
         if not isinstance(test_obj, Iterable):
             obj = obj,
 
         return obj
+
+    def _trim_data(self, data, time, tstart = None, tend = None):
+        """
+        select data with time in the range [tstart, tend]
+        """
+        idx_start = bisect(time, tstart)  if tstart  else None
+        idx_end   = bisect(time, tend)    if tend    else None
+
+        return data[idx_start:idx_end]
 
     def _get_evolution(self, quant, tscale = "pb"):
         """
@@ -375,7 +390,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         else:
             raise ValueError("Unknown quantity: {}".format(quant))
 
-        if not self._get_ascii_table(key):
+        if self._get_ascii_table(key) is None:
             self.ascii_loader[key]()
 
         table = self._get_ascii_table(key)
@@ -386,6 +401,20 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             time = time - self.pb_time
 
         return time, data
+
+    def _get_loc_isodensity(self, dens, nouts):
+        # Get the location of given density in the binary outputs
+        dens  = self._check_iterable(dens)
+        nouts = self._check_iterable(nouts)
+
+        radii = [None] * len(nouts)
+        for idx, nout in enumerate(tqdm(nouts)):
+            self.get_profile(nout)
+
+            func_inte = interp1d(self.binary["promro"], self.binary["radius"])
+            radii[idx] = func_inte(dens)
+
+        return np.array(radii)
 
     def get_profile(self, nout):
         # get the data in the binary file in directory 'data'
@@ -920,7 +949,10 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                                 shading = "gouraud")
 
         # TODO: adjust colorbar
-        cbar = plt.colorbar(img, ax = ax)
+        pass
+        label_cb = self._get_gw_text(mode)
+        cbar = plt.colorbar(img, ax = ax, pad = 0.02)
+        cbar.set_label("Strain " + label_cb, rotation = 270, labelpad = 20)
 
         label_x = self._get_xlabel()
         ax.set_xlabel(label_x)
@@ -1041,6 +1073,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                           method = "binary", bin_data = False, neos = None,
                           include_vphi = False, include_vphi_ave = False,
                           include_vtheta = False, include_vtheta_ave = False,
+                          isodensity = None, isodensity_label = None,
                           ax = None, vminmax = None, **kwargs):
         """
         Plot the evolution of derived profile after core bounce in contour plot
@@ -1055,22 +1088,21 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
                Support quantity: Brunt-Vaisala frequency   (quant = "bv")
                                  Solberg-Hoiland criterion (quant = "sh")
         vminmax: the vmin and vmax, where vmin = -vminmax and vmax = vminmax
+        isodensity: plot the isodensity contour if given
         """
         assert quant in ["bv", "sh", "vaniso"], "Unknown quantity: {}".format(quant)
 
         nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
         times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
 
-        # trim data if tend is specified
-        if tend is not None:
-            idx_trim = bisect(times, tend)
-            nouts    = nouts[:idx_trim]
-            times    = times[:idx_trim]
+        # select data in the specified time range
+        nouts = self._trim_data(nouts, times, tend = tend)
+        times = self._trim_data(times, times, tend = tend)
 
         # obtain the data and setting cmap
         if quant == "bv":
             func = self.calc_BV_frequency
-            cmap = "bwr"
+            cmap = "bwr_r"
         elif quant == "sh":
             func = self.calc_SH_criterion
             cmap = "bwr_r"
@@ -1086,7 +1118,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         # plot here
         fig, ax = self._create_figure(ax)
 
-        times, radial = np.meshgrid(times, radial)
+        times_ext, radial_ext = np.meshgrid(times, radial)
 
         if vminmax:
             vmin, vmax = -vminmax, vminmax
@@ -1098,7 +1130,7 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         else:
             norm = DivergingNorm(vmin = vmin, vcenter = 0, vmax = vmax)
 
-        im = ax.pcolormesh(times, radial / 1e5, data.T,
+        im = ax.pcolormesh(times_ext, radial_ext / 1e5, data.T,
                            shading = "gouraud", cmap = cmap,
                            vmin = vmin, vmax = vmax, norm = norm, **kwargs)
 
@@ -1118,6 +1150,30 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
             cbar = plt.colorbar(im, ax = ax, pad = 0.02)
 
         cbar.set_label(cb_label, rotation = 270, labelpad = 20)
+
+        # plot isodensity contour (black dotted line)
+        if isodensity:
+            isodensity = self._check_iterable(isodensity)
+            radii = self._get_loc_isodensity(isodensity, nouts)
+
+            if isodensity_label is None:
+                isodensity_label = [r"$\rho = $" + "{:.1e}".format(d)  for d in isodensity]
+
+            # use labelLines
+#            for d, r, label in zip(isodensity, radii, isodensity_label):
+#            for d, r, label in zip(isodensity, radii.T, isodensity_label):
+#                ax.plot(times, r / 1e5, ls = "dashed", c = u"#ff7f0e", label = label)
+#            labelLines(ax.get_lines(), xvals = (0.1, 1), zorder = 2.5)
+
+            for d, r, label in zip(isodensity, radii.T, isodensity_label):
+                ax.plot(times, r / 1e5, ls = "solid", c = "k")
+
+                # add label
+                loc_idx = int(len(nouts) / 5)
+                loc_x = times[loc_idx]
+                loc_y = r[loc_idx] / 1e5
+                ax.text(loc_x, loc_y, label, c = "k", zorder = 2, ha = "center",
+                        bbox = dict(facecolor = "w", edgecolor = None) )
 
         if fig is not None:
             return fig, ax
@@ -1144,11 +1200,9 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
         times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
 
-        # trim data if tend is specified
-        if tend is not None:
-            idx_trim = bisect(times, tend)
-            nouts    = nouts[:idx_trim]
-            times    = times[:idx_trim]
+        # select data in the specified time range
+        nouts = self._trim_data(nouts, times, tend = tend)
+        times = self._trim_data(times, times, tend = tend)
 
         # override ls and ms if lms is assigned
         if lms is not None:
@@ -1213,11 +1267,9 @@ class sphynx(sphynx_ascii, sphynx_binary, sphynx_par):
         nouts = [nout  for nout in self.get_all_binary()  if nout >= self.pb_nout]
         times = [self.time_rel[i] * sec2ms  for i in nouts]  # in ms
 
-        # trim data if tend is specified
-        if tend is not None:
-            idx_trim = bisect(times, tend)
-            nouts    = nouts[:idx_trim]
-            times    = times[:idx_trim]
+        # select data in the specified time range
+        nouts = self._trim_data(nouts, times, tend = tend)
+        times = self._trim_data(times, times, tend = tend)
 
         lms = [(l, m)  for m in range(-l, l + 1)] + [(0, 0)]
         ls, ms = zip(*lms)
